@@ -7,7 +7,7 @@
 using FileItem = std::variant<class Drive, class File, class Directory>;
 using Path = std::vector<int>;
 using PartialPath = std::span<int>;
-class NonExist : std::exception {NonExist():std::exception("Does not exist"){}};
+struct NonExist : std::runtime_error {NonExist():std::runtime_error("Does not exist"){}};
 class NamedFileItem
 {
     std::string m_name;
@@ -49,15 +49,25 @@ public:
         }
     }
 
-    const FileItem& Get(int idx) const { return m_contents[idx]; }
-    FileItem& Get(int idx) { return m_contents[idx]; }
+    const FileItem& Get(int idx) const { return m_contents.at(idx); }
+    FileItem& Get(int idx) { return m_contents.at(idx); }
     size_t GetNumItems(int idx) const { return m_contents.size(); }
+    const FileItem& GetPath(PartialPath path) const
+    {
+        if (path.size()==1)
+            return m_contents.at(path[0]);
+        else
+            return std::visit(
+                [&path](const auto& obj) -> const FileItem& {
+                    return obj.GetPath(path.subspan(1));
+                }, m_contents.at(path[0]));
+    }
 
 
 
     void Add(const FileItem& item) {m_contents.emplace_back(item);}
     // warning removing always invalidates all paths.
-    void Remove(int idx) {m_contents.erase(m_contents.begin()+idx);}
+//    void Remove(int idx) {m_contents.erase(m_contents.begin()+idx);}
 };
 
 class Drive : public ContainerFileItem<Drive>
@@ -99,17 +109,12 @@ public:
     {
         fn(*this, path);
     }
-    const FileItem& Get(int idx) const { throw NonExist{}; return {}; }
-    FileItem& Get(int idx) { throw NonExist{}; return {}; }
+    const FileItem& Get(int idx) const { throw NonExist{}; }
+    FileItem& Get(int idx) { throw NonExist{}; }
+    const FileItem& GetPath(PartialPath) const { throw NonExist{}; }
+    FileItem& Get(PartialPath) { throw NonExist{}; }
 };
 
-const FileItem& GetPath(const FileItem& item, PartialPath path)
-{
-    return std::visit(
-        [&path](const auto& obj){
-            return GetPath(obj.Get(path[0]), path.subspan(1));
-        }, item);
-}
 
 void PrintContents(const FileItem& dir)
 {
@@ -125,7 +130,7 @@ void PrintContents(const FileItem& dir)
 
 
 
-TEST(Dir,Test1)
+TEST(FileItem,Get)
 {
     File animal_file{"Aardvark"};
     Directory animal_files{"Animals", 
@@ -136,7 +141,22 @@ TEST(Dir,Test1)
     PrintContents(drive_a);
     const auto dir = std::get<Directory>(drive_a.Get(0));
     ASSERT_STREQ(dir.GetName().data(), "Animals");
+    Path path{0,0};
     const auto file = std::get<File>(dir.Get(0));
     ASSERT_STREQ(file.GetName().data(), "Aardvark");
+}
+
+TEST(FileItem,GetPath)
+{
+    File animal_file{"Aardvark"};
+    Directory animal_files{"Animals", 
+        {animal_file}
+    };
+    Drive drive_a{'a',
+        {animal_files}};
     Path path{0,0};
+    const auto dir = std::get<Directory>(drive_a.GetPath(std::span(path.data(), 1)));
+    ASSERT_STREQ(dir.GetName().data(), "Animals");
+    const auto file = std::get<File>(drive_a.GetPath(std::span(path.data(), 2)));
+    ASSERT_STREQ(file.GetName().data(), "Aardvark");
 }
