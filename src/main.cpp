@@ -39,6 +39,7 @@ public:
     {
         for (const auto& c:m_contents) fn(c);
     }
+    FileItem& Get(int idx) { if(idx<0 || idx>=(int)m_contents.size()) throw NonExist{}; return m_contents[idx];}
 };
 
 class Drive : public ContainerFileItem
@@ -56,7 +57,7 @@ public:
 
 
 
-class Directory : public NamedFileItem, public ContainerFileItem
+class Directory : public ContainerFileItem, public NamedFileItem
 {
 public:
     Directory() = default;
@@ -112,15 +113,43 @@ class FileItem : public FileItemVariant
             path.pop_back();
         });
     }
-
+    FileItem& Get(ContainerFileItem& fi, int idx)
+    {
+        return fi.Get(idx);
+    }
+    FileItem& Get(File& fi, int idx)
+    {
+        throw NonExist{};
+    }
 public:
+    using FileItemVariant::FileItemVariant;
+ 
     template<class Fn>
     void Recurse(Fn&& fn) const
     {
         Recurse(std::forward<Fn>(fn), Path{});
     }
+    FileItem& operator[](int idx)
+    {
+        auto& as_variant = static_cast<FileItemVariant&>(*this);
+        auto& retval = std::visit(
+            [this, idx](auto& item)->FileItem& {
+                return Get(item, idx);
+            }, as_variant);
+        return retval;
+    }
+    FileItem& operator[](const Path& path)
+    {
+        auto remaining = std::span<const int>(path.data(), path.size());
+        FileItem* current = this;
+        while (!remaining.empty())
+        {
+            current = &(*current)[remaining[0]];
+            remaining = remaining.subspan(1);
+        }
+        return *current;
+    }
     friend std::ostream& operator<<(std::ostream&, const FileItem&);
-    using FileItemVariant::FileItemVariant;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const FileItem& item)
@@ -145,27 +174,27 @@ TEST(FileItem,Get)
         {animal_files}
     };
     std::cout << drive_a;
-//    PrintContents(drive_a);
-//    const auto dir = std::get<Directory>(drive_a.Get(0));
-//    ASSERT_STREQ(dir.GetName().data(), "Animals");
-//    Path path{0,0};
-//    const auto file = std::get<File>(dir.Get(0));
-//    ASSERT_STREQ(file.GetName().data(), "Aardvark");
+    auto dir = std::get<Directory>(drive_a[0]);
+    ASSERT_THROW(drive_a[1], NonExist);
+    ASSERT_STREQ(dir.GetName().data(), "Animals");
+    const auto file = std::get<File>(dir.Get(0));
+    ASSERT_STREQ(file.GetName().data(), "Aardvark");
 }
 
-/*
+
 TEST(FileItem,GetPath)
 {
     File animal_file{"Aardvark"};
     Directory animal_files{"Animals", 
         {animal_file}
     };
-    Drive drive_a{'a',
-        {animal_files}};
-    Path path{0,0};
-    const auto dir = std::get<Directory>(drive_a.GetPath(std::span(path.data(), 1)));
+    FileItem drive_a = Drive{'a', 
+        {animal_files}
+    };
+    const auto dir = std::get<Directory>(drive_a[Path{0}]);
     ASSERT_STREQ(dir.GetName().data(), "Animals");
-    const auto file = std::get<File>(drive_a.GetPath(std::span(path.data(), 2)));
+    ASSERT_THROW(drive_a[Path{1}], NonExist);
+    const auto file = std::get<File>(drive_a[Path{0,0}]);
     ASSERT_STREQ(file.GetName().data(), "Aardvark");
+    ASSERT_THROW((drive_a[Path{0,1}]), NonExist);
 }
-*/
