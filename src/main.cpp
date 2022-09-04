@@ -6,8 +6,8 @@
 
 using FileItemVariant = std::variant<class Drive, class File, class Directory>;
 using Path = std::vector<int>;
-using PartialPath = std::span<int>;
 struct NonExist : std::runtime_error {NonExist():std::runtime_error("Does not exist"){}};
+struct CannotRename : std::runtime_error {CannotRename():std::runtime_error("Cannot rename"){}};
 
 class FileItem;
 
@@ -20,6 +20,7 @@ public:
     NamedFileItem(std::string_view name):m_name(name) {}
 
     std::string_view GetName() const { return std::string_view{m_name}; }
+    void SetName(std::string_view n) { m_name = n; }
 };
 
 class ContainerFileItem
@@ -81,45 +82,41 @@ class FileItem : public FileItemVariant
         const auto as_variant = static_cast<const FileItemVariant&>(*this);
         std::visit(
             [this,&fn, &path](const auto& item) {
+                fn(item, path);
                 Recurse(std::forward<Fn>(fn), item, path);
             }, as_variant);
     }
     // process
-    template<class Fn>
-    void Recurse(Fn&& fn, const Drive& item, Path path) const
+    template<class Fn, class FileItemType>
+    void Recurse(Fn&& fn, const FileItemType& item, Path path) const
     {
-        fn(item, path);
-        Recurse(std::forward<Fn>(fn), static_cast<const ContainerFileItem&>(item), path);
-    }
-    template<class Fn>
-    void Recurse(Fn&& fn, const Directory& item, Path path) const
-    {
-        fn(item, path);
-        Recurse(std::forward<Fn>(fn), static_cast<const ContainerFileItem&>(item), path);
-    }
-    template<class Fn>
-    void Recurse(Fn&& fn, const File& item, Path path) const
-    {
-        fn(item, path);
-    }
-
-    template<class Fn>
-    void Recurse(Fn&& fn, const ContainerFileItem& item, Path path) const
-    {
-        item.Visit([&fn, path, i=0] (const FileItem& fi) mutable
+        if constexpr (std::is_base_of_v<ContainerFileItem, FileItemType>)
         {
-            path.push_back(i++);
-            fi.Recurse(std::forward<Fn>(fn), path);
-            path.pop_back();
-        });
+            item.Visit([&fn, path, i=0] (const FileItem& fi) mutable
+            {
+                path.push_back(i++);
+                fi.Recurse(std::forward<Fn>(fn), path);
+                path.pop_back();
+            });
+        }
     }
-    FileItem& Get(ContainerFileItem& fi, int idx)
+    // access
+    template<class FileItemType>
+    FileItem& Get(FileItemType& fi, int idx)
     {
-        return fi.Get(idx);
+        if constexpr (std::is_base_of_v<ContainerFileItem, FileItemType>)
+            return fi.Get(idx);
+        else
+            throw NonExist{};
     }
-    FileItem& Get(File& fi, int idx)
+    // operations
+    template<class FileItemType>
+    void Rename(FileItemType& fi, std::string_view new_name)
     {
-        throw NonExist{};
+        if constexpr (std::is_base_of_v<NamedFileItem, FileItemType>)
+            fi.SetName(new_name);
+        else
+            throw CannotRename{};
     }
 public:
     using FileItemVariant::FileItemVariant;
@@ -129,14 +126,21 @@ public:
     {
         Recurse(std::forward<Fn>(fn), Path{});
     }
+    void Rename(std::string_view new_name)
+    {
+        auto& as_variant = static_cast<FileItemVariant&>(*this);
+        std::visit(
+            [this, new_name](auto& item) {
+                Rename(item, new_name);
+            }, as_variant);
+    }
     FileItem& operator[](int idx)
     {
         auto& as_variant = static_cast<FileItemVariant&>(*this);
-        auto& retval = std::visit(
+        return std::visit(
             [this, idx](auto& item)->FileItem& {
                 return Get(item, idx);
             }, as_variant);
-        return retval;
     }
     FileItem& operator[](const Path& path)
     {
@@ -194,7 +198,10 @@ TEST(FileItem,GetPath)
     const auto dir = std::get<Directory>(drive_a[Path{0}]);
     ASSERT_STREQ(dir.GetName().data(), "Animals");
     ASSERT_THROW(drive_a[Path{1}], NonExist);
-    const auto file = std::get<File>(drive_a[Path{0,0}]);
+    const auto& file = std::get<File>(drive_a[Path{0,0}]);
     ASSERT_STREQ(file.GetName().data(), "Aardvark");
     ASSERT_THROW((drive_a[Path{0,1}]), NonExist);
+
+    drive_a[Path{0,0}].Rename("Antalope");
+    ASSERT_STREQ(file.GetName().data(), "Antalope");
 }
