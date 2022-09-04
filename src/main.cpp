@@ -4,10 +4,14 @@
 #include <vector>
 #include <span>
 
-using FileItem = std::variant<class Drive, class File, class Directory>;
+using FileItemVariant = std::variant<class Drive, class File, class Directory>;
 using Path = std::vector<int>;
 using PartialPath = std::span<int>;
 struct NonExist : std::runtime_error {NonExist():std::runtime_error("Does not exist"){}};
+
+class FileItem;
+
+
 class NamedFileItem
 {
     std::string m_name;
@@ -18,66 +22,33 @@ public:
     std::string_view GetName() const { return std::string_view{m_name}; }
 };
 
-template<class Derived>
 class ContainerFileItem
 {
     std::vector<FileItem>   m_contents;
 public:
     ContainerFileItem() = default;
     ContainerFileItem(std::initializer_list<FileItem> list): m_contents(list) {}
-    template<class Fn>
-    void Recurse(Fn&& fn, Path path)
-    {
-        fn(static_cast<Derived&>(*this), path);
-        for (size_t i = 0; i < m_contents.size(); ++i)
-        {
-            path.push_back(i);
-            std::visit([&fn](auto& i){i.Recurse(std::forward<Fn>(fn));}, m_contents.at(i));
-            path.pop_back(); 
-        }
-    }
 
     template<class Fn>
-    void Recurse(Fn&& fn, Path path) const
+    void Visit(Fn&& fn)
     {
-        fn(static_cast<const Derived&>(*this), path);
-        for (size_t i = 0; i < m_contents.size(); ++i)
-        {
-            path.push_back(i);
-            std::visit([&fn, &path](auto& item){item.Recurse(std::forward<Fn>(fn), path);}, m_contents.at(i));
-            path.pop_back(); 
-        }
+        for (auto& c:m_contents) fn(c);
     }
-
-    const FileItem& Get(int idx) const { return m_contents.at(idx); }
-    FileItem& Get(int idx) { return m_contents.at(idx); }
-    size_t GetNumItems(int idx) const { return m_contents.size(); }
-    const FileItem& GetPath(PartialPath path) const
+    template<class Fn>
+    void Visit(Fn&& fn) const
     {
-        if (path.size()==1)
-            return m_contents.at(path[0]);
-        else
-            return std::visit(
-                [&path](const auto& obj) -> const FileItem& {
-                    return obj.GetPath(path.subspan(1));
-                }, m_contents.at(path[0]));
+        for (const auto& c:m_contents) fn(c);
     }
-
-
-
-    void Add(const FileItem& item) {m_contents.emplace_back(item);}
-    // warning removing always invalidates all paths.
-//    void Remove(int idx) {m_contents.erase(m_contents.begin()+idx);}
 };
 
-class Drive : public ContainerFileItem<Drive>
+class Drive : public ContainerFileItem
 {
     char                    m_drive_letter{'a'};
 public:
     Drive(char id) : m_drive_letter(id) {}
     Drive(char id, std::initializer_list<FileItem> contents) 
         : m_drive_letter(id)
-        , ContainerFileItem<Drive>(contents)
+        , ContainerFileItem(contents)
         {}
 
     std::string_view GetName() const { return std::string_view{&m_drive_letter, 1}; }
@@ -85,67 +56,104 @@ public:
 
 
 
-class Directory : public NamedFileItem, public ContainerFileItem<Directory>
+class Directory : public NamedFileItem, public ContainerFileItem
 {
 public:
     Directory() = default;
-    Directory(std::string_view name) : NamedFileItem(name), ContainerFileItem<Directory>({}) {}
-    Directory(std::string_view name, std::initializer_list<FileItem> list) : NamedFileItem(name), ContainerFileItem<Directory>(list) {}
+    Directory(std::string_view name) : NamedFileItem(name), ContainerFileItem({}) {}
+    Directory(std::string_view name, std::initializer_list<FileItem> list) : NamedFileItem(name), ContainerFileItem(list) {}
 };
 
 class File : public NamedFileItem
 {
 public:
     using NamedFileItem::NamedFileItem;
-
-    template<class Fn>
-    void Recurse(Fn&& fn, Path path)
-    {
-        fn(*this, path);
-    }
-
-    template<class Fn>
-    void Recurse(Fn&& fn, Path path) const
-    {
-        fn(*this, path);
-    }
-    const FileItem& Get(int idx) const { throw NonExist{}; }
-    FileItem& Get(int idx) { throw NonExist{}; }
-    const FileItem& GetPath(PartialPath) const { throw NonExist{}; }
-    FileItem& Get(PartialPath) { throw NonExist{}; }
 };
 
 
-void PrintContents(const FileItem& dir)
+class FileItem : public FileItemVariant
 {
-    const auto Print = [](const auto& item, Path path)
+    // dispatch
+    template<class Fn>
+    void Recurse(Fn&& fn, Path path) const
     {
-        for (size_t i = 0; i < path.size(); ++i)
+        const auto as_variant = static_cast<const FileItemVariant&>(*this);
+        std::visit(
+            [this,&fn, &path](const auto& item) {
+                Recurse(std::forward<Fn>(fn), item, path);
+            }, as_variant);
+    }
+    // process
+    template<class Fn>
+    void Recurse(Fn&& fn, const Drive& item, Path path) const
+    {
+        fn(item, path);
+        Recurse(std::forward<Fn>(fn), static_cast<const ContainerFileItem&>(item), path);
+    }
+    template<class Fn>
+    void Recurse(Fn&& fn, const Directory& item, Path path) const
+    {
+        fn(item, path);
+        Recurse(std::forward<Fn>(fn), static_cast<const ContainerFileItem&>(item), path);
+    }
+    template<class Fn>
+    void Recurse(Fn&& fn, const File& item, Path path) const
+    {
+        fn(item, path);
+    }
+
+    template<class Fn>
+    void Recurse(Fn&& fn, const ContainerFileItem& item, Path path) const
+    {
+        item.Visit([&fn, path, i=0] (const FileItem& fi) mutable
+        {
+            path.push_back(i++);
+            fi.Recurse(std::forward<Fn>(fn), path);
+            path.pop_back();
+        });
+    }
+
+public:
+    template<class Fn>
+    void Recurse(Fn&& fn) const
+    {
+        Recurse(std::forward<Fn>(fn), Path{});
+    }
+    friend std::ostream& operator<<(std::ostream&, const FileItem&);
+    using FileItemVariant::FileItemVariant;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const FileItem& item)
+{
+    const auto print_fn = [&os](const auto& fi, Path path)
+    {
+        for (int ignored: path)
             std::cout << "\t";
-        std::cout << item.GetName();
-        std::cout << "\n";
+        os<<fi.GetName()<<"\n";
     };
-    std::visit([&Print](const auto& i){i.Recurse(Print, Path{});}, dir); 
+    item.Recurse(print_fn);
+    return os;
 }
-
-
 
 TEST(FileItem,Get)
 {
     File animal_file{"Aardvark"};
     Directory animal_files{"Animals", 
-        {animal_file}
+        {FileItem{animal_file}}
     };
-    Drive drive_a{'a', 
-        {animal_files}};
-    PrintContents(drive_a);
-    const auto dir = std::get<Directory>(drive_a.Get(0));
-    ASSERT_STREQ(dir.GetName().data(), "Animals");
-    Path path{0,0};
-    const auto file = std::get<File>(dir.Get(0));
-    ASSERT_STREQ(file.GetName().data(), "Aardvark");
+    FileItem drive_a = Drive{'a', 
+        {animal_files}
+    };
+    std::cout << drive_a;
+//    PrintContents(drive_a);
+//    const auto dir = std::get<Directory>(drive_a.Get(0));
+//    ASSERT_STREQ(dir.GetName().data(), "Animals");
+//    Path path{0,0};
+//    const auto file = std::get<File>(dir.Get(0));
+//    ASSERT_STREQ(file.GetName().data(), "Aardvark");
 }
 
+/*
 TEST(FileItem,GetPath)
 {
     File animal_file{"Aardvark"};
@@ -160,3 +168,4 @@ TEST(FileItem,GetPath)
     const auto file = std::get<File>(drive_a.GetPath(std::span(path.data(), 2)));
     ASSERT_STREQ(file.GetName().data(), "Aardvark");
 }
+*/
